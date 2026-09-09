@@ -26,7 +26,9 @@ chmod +x ./install-gmic-for-gimp-macos.sh
 ./install-gmic-for-gimp-macos.sh
 ```
 
-3. Restart your machine, and then run it again:
+3. If the script installs XQuartz for the first time, it will stop and ask you to
+restart (or log out/in) and re-run it — only in that case do you need a second
+run:
 
 ```sh
 cd ~/Desktop
@@ -77,7 +79,22 @@ headers. The script:
 4. verifies the linkage (aborts if any Homebrew glib/gegl leaked in),
    ad-hoc signs the binary, installs it to
    `~/Library/Application Support/GIMP/<version>/plug-ins/gmic_gimp_qt/`,
-   and smoke-tests it.
+   and smoke-tests it;
+5. applies two source patches before building — the `CMakeLists.txt` X11 patch
+   above, and a fix for the **Colorize [Interactive]** zoom crash (see below) in
+   G'MIC's command library — and, by default, disables the plug-in's periodic
+   internet updates so the patched library isn't overwritten.
+
+## Colorize [Interactive] fix & internet updates
+
+The script patches an upstream bug in G'MIC's **Colorize [Interactive]** filter
+that crashes the interactive window on zoom (scroll wheel / CTRL+arrows) with an
+"Unbalanced parentheses/brackets" error. Because G'MIC can re-download its filter
+catalog and clobber that fix, the script also **disables G'MIC's periodic
+internet updates by default** so the patched built-in library keeps being used.
+Pass `--keep-internet-updates` to leave auto-updates on (then re-run the script
+after a catalog update if the crash returns). You can toggle this any time in the
+plug-in's settings (gear icon → Internet updates).
 
 ## Caveats
 

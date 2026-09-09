@@ -24,6 +24,11 @@
 #                          (default: ~/.gmic-gimp-build)
 #   --jobs N               Parallel build jobs (default: all CPU cores)
 #   --skip-deps            Don't run `brew install` (you manage deps yourself)
+#   --keep-internet-updates  Don't disable G'MIC's auto-update of its filter
+#                          catalog. By default this script turns auto-updates
+#                          off, because a downloaded catalog re-introduces the
+#                          "Colorize [Interactive]" zoom crash that this script
+#                          patches. Re-enable any time in G'MIC-Qt settings.
 #   --uninstall            Remove the installed plug-in and exit
 #   -h | --help            Show this help
 #
@@ -46,6 +51,48 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 trap 'printf "\033[1;31mERROR:\033[0m script failed near line %s. Scroll up for details.\n" "$LINENO" >&2' ERR
 
+# Fix an upstream bug in G'MIC's "Colorize [Interactive]" filter (_x_colorize):
+# the zoom-in / zoom-out handlers ship malformed math expressions -- a stray ')'
+# after '/2' and mismatched '{'/'}' around the x0/y0/x1/y1 updates -- so scrolling
+# or CTRL+arrows to zoom crashes the interactive window with
+#   Operator ':=' on variable 'cx': ... Unbalanced parentheses/brackets.
+# The correct form (no trailing ')', plain ':=' assignments) is used verbatim by
+# G'MIC's other interactive tools. Whitespace-agnostic and idempotent, so it is
+# safe to run on the source tree (indented) and on the downloaded catalog
+# (~/.config/gmic/update*.gmic, un-indented) alike.
+patch_gmic_colorize() { # patch_gmic_colorize <file.gmic>
+  local f="$1"
+  [ -f "$f" ] || return 0
+  perl -pi -e '
+    s{(\?\$x:\(\$x0\+\$x1\)/2)\)}{$1}g;
+    s{(\?\$y:\(\$y0\+\$y1\)/2)\)}{$1}g;
+    s{\)([*/]0\.75)\} (y[01])=\{}{)$1 $2:=}g;
+    s{\)/2\} (dy)=\{}{)/2 $1:=}g;
+  ' "$f"
+}
+
+# Disable G'MIC-Qt's periodic auto-update of its filter catalog. Otherwise the
+# plug-in re-downloads the upstream catalog (which still has the Colorize
+# [Interactive] zoom crash), overriding the built-in library we patched above.
+# The setting lives in the plug-in's QSettings (macOS native = a plist in
+# ~/Library/Preferences): key "Config/UpdatesPeriodicityValue", where INT_MAX
+# means "Never" (gmic-qt Globals.h; MainWindow.cpp: useNetwork = value!=Never).
+# The QSettings domain is the org domain "greyc.fr" reversed + app "gmic_qt".
+# Idempotent; users who want auto-updates can pass --keep-internet-updates or
+# re-enable it in the plug-in's settings (gear icon -> Internet updates).
+disable_internet_updates() {
+  local domain="fr.greyc.gmic_qt" key="Config.UpdatesPeriodicityValue" never=2147483647 cur
+  cur="$(defaults read "$domain" "$key" 2>/dev/null || true)"
+  if [ "$cur" = "$never" ]; then
+    log "G'MIC internet updates already disabled (built-in patched library is used)"
+  else
+    defaults write "$domain" "$key" -int "$never"
+    log "disabled G'MIC internet updates (was: ${cur:-unset}) so the Colorize fix persists"
+    log "  re-enable any time: G'MIC-Qt settings (gear icon) -> Internet updates,"
+    log "  or re-run with --keep-internet-updates"
+  fi
+}
+
 # ---------------------------------------------------------------- arguments
 GMIC_VERSION=""
 GIMP_APP="/Applications/GIMP.app"
@@ -54,6 +101,7 @@ WORK="$HOME/.gmic-gimp-build"
 JOBS="$(sysctl -n hw.ncpu)"
 SKIP_DEPS=0
 UNINSTALL=0
+KEEP_NET_UPDATES=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,8 +112,9 @@ while [ $# -gt 0 ]; do
     --work-dir)     WORK="${2:?}"; shift 2 ;;
     --jobs)         JOBS="${2:?}"; shift 2 ;;
     --skip-deps)    SKIP_DEPS=1; shift ;;
+    --keep-internet-updates) KEEP_NET_UPDATES=1; shift ;;
     --uninstall)    UNINSTALL=1; shift ;;
-    -h|--help)      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)      sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
@@ -191,6 +240,12 @@ fetch "$GIMP_URL" "$GIMP_TARBALL"
 [ -d "gimp-$GIMP_FULL" ]     || { log "extracting $GIMP_TARBALL";  tar xJf "$GIMP_TARBALL"; }
 [ -d "gmic-$GMIC_VERSION/gmic-qt" ] || die "gmic tarball layout unexpected (no gmic-qt/ inside)"
 
+# Fix the "Colorize [Interactive]" zoom crash in the bundled command library.
+if [ -f "gmic-$GMIC_VERSION/src/gmic_stdlib.gmic" ]; then
+  log "patching Colorize [Interactive] zoom crash in gmic_stdlib.gmic"
+  patch_gmic_colorize "gmic-$GMIC_VERSION/src/gmic_stdlib.gmic"
+fi
+
 # For macOS builds (notably G'MIC 4.x), enable cimg display/X11 glue in the
 # gmic-qt CMakeLists so the Qt GUI can use X11 via XQuartz. This mirrors the
 # manual patch some users apply upstream.
@@ -201,7 +256,7 @@ if [ -f "$WORK/gmic-$GMIC_VERSION/gmic-qt/CMakeLists.txt" ]; then
   # Only apply when the file disables cimg display; the perl one-liner edits
   # the file in-place and preserves indentation.
   if grep -q "add_definitions(-Dcimg_display=0)" CMakeLists.txt; then
-    perl -0pi -e 's/add_definitions\(-Dcimg_display=0\)\n(\s*)add_definitions\(-D_IS_MACOS_\)/add_definitions(-Dcimg_display=1)\n$1add_definitions(-D_IS_MACOS_)\n$1find_package(X11 REQUIRED)\n$1include_directories(SYSTEM \\${X11_INCLUDE_DIR})\n$1set(gmic_qt_LIBRARIES \\${gmic_qt_LIBRARIES} \\${X11_LIBRARIES})/' CMakeLists.txt
+    perl -0pi -e 's/add_definitions\(-Dcimg_display=0\)\n(\s*)add_definitions\(-D_IS_MACOS_\)/add_definitions(-Dcimg_display=1)\n$1add_definitions(-D_IS_MACOS_)\n$1find_package(X11 REQUIRED)\n$1include_directories(SYSTEM \${X11_INCLUDE_DIR})\n$1set(gmic_qt_LIBRARIES \${gmic_qt_LIBRARIES} \${X11_LIBRARIES})/' CMakeLists.txt
     log "patched CMakeLists.txt (backup at CMakeLists.txt.orig)"
   else
     log "CMakeLists.txt already appears patched; skipping"
@@ -335,10 +390,16 @@ xattr -d com.apple.quarantine "$PLUGIN_DIR/gmic_gimp_qt" 2>/dev/null || true
 
 # Smoke test: run standalone. Expected: libgimp complains it must be run by
 # GIMP (non-zero exit is fine). A dyld error or crash signal means trouble.
+# NB: if the plug-in is killed by a signal, bash fires the ERR trap for the
+# command substitution even under `set +e`, printing a bogus "script failed"
+# line. Disable the trap for the duration, then restore it, so a harmless
+# standalone SIGKILL doesn't look like a build failure.
+trap - ERR
 set +e
 out="$("$PLUGIN_DIR/gmic_gimp_qt" 2>&1)"
 rc=$?
 set -e
+trap 'printf "\033[1;31mERROR:\033[0m script failed near line %s. Scroll up for details.\n" "$LINENO" >&2' ERR
 if printf '%s' "$out" | grep -qiE 'library not loaded|symbol not found|image not found'; then
   printf '%s\n' "$out" >&2
   die "smoke test failed: a library did not resolve (see above). Not usable; check otool -L '$PLUGIN_DIR/gmic_gimp_qt'"
@@ -349,7 +410,35 @@ else
   log "smoke test OK: plug-in starts and all libraries resolve"
 fi
 
+# G'MIC downloads its filter catalog (update<ver>.gmic) into the user config
+# dir on first launch and runs it in preference to the built-in library, so the
+# source patch above is not enough if that file already exists. Patch any copy
+# already downloaded; if none exists yet it will be created on first launch and
+# re-running this script (or "Update filters" in the plug-in) re-applies the fix.
+patched_catalog=0
+for cat in "$HOME/.config/gmic/"update*.gmic; do
+  [ -f "$cat" ] || continue
+  patch_gmic_colorize "$cat"
+  log "patched Colorize [Interactive] zoom crash in $cat"
+  patched_catalog=1
+done
+
+# By default, stop the plug-in from re-downloading the (still-buggy) upstream
+# catalog, so the built-in patched library sticks and the Colorize fix persists
+# without having to re-run this script. Opt out with --keep-internet-updates.
+if [ "$KEEP_NET_UPDATES" = 1 ]; then
+  log "leaving G'MIC internet updates as-is (--keep-internet-updates)"
+else
+  disable_internet_updates
+fi
+
 log "DONE. G'MIC $GMIC_VERSION installed for GIMP $GIMP_FULL."
 log "Restart GIMP, open an image, and look under:  Filters -> G'MIC-Qt"
-log "(the first launch downloads the filter catalog; ~1000 filters)"
+if [ "$KEEP_NET_UPDATES" = 1 ]; then
+  log "(the first launch downloads the filter catalog; ~1000 filters)"
+  if [ "$patched_catalog" = 0 ]; then
+    log "NOTE: no catalog found yet -- with internet updates on, if Colorize"
+    log "      [Interactive] crashes on zoom after first launch, re-run this script."
+  fi
+fi
 log "To update later, just re-run this script. To remove: $0 --uninstall"
