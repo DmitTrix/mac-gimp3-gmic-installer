@@ -16,7 +16,7 @@
 #   ./install-gmic-for-gimp-macos.sh [options]
 #
 # Options:
-#   --gmic-version X.Y.Z   Pin a G'MIC version (default: latest from gmic.eu)
+#   --gmic-version X.Y.Z   Pin a G'MIC version (default: latest GitHub release)
 #   --gimp-app PATH        Path to GIMP.app (default: /Applications/GIMP.app)
 #   --qt5 | --qt6          Force Qt major version (default: qt@5 if present,
 #                          else qt6, else installs qt@5)
@@ -217,17 +217,17 @@ command -v cmake      >/dev/null 2>&1 || die "cmake not found"
 
 # ---------------------------------------------------------------- versions
 if [ -z "$GMIC_VERSION" ]; then
-  log "looking up latest G'MIC release on gmic.eu ..."
-  GMIC_VERSION="$(curl -fsSL --max-time 30 https://gmic.eu/files/source/ \
-    | grep -oE 'gmic_[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' \
-    | sed -E 's/^gmic_|\.tar\.gz$//g' \
-    | sort -t. -k1,1n -k2,2n -k3,3n | uniq | tail -1 || true)"
+  log "looking up latest G'MIC release on GitHub ..."
+  # /releases/latest redirects to .../releases/tag/v.X.Y.Z (no API rate limit).
+  GMIC_VERSION="$(curl -fsSL --max-time 30 -o /dev/null -w '%{url_effective}' \
+    https://github.com/GreycLab/gmic/releases/latest \
+    | sed -nE 's|.*/tag/v\.?([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' || true)"
   [ -n "$GMIC_VERSION" ] || die "could not determine latest G'MIC version. Pin one with --gmic-version X.Y.Z"
 fi
 log "G'MIC version: $GMIC_VERSION"
 
 GMIC_TARBALL="gmic_${GMIC_VERSION}.tar.gz"
-GMIC_URL="https://gmic.eu/files/source/$GMIC_TARBALL"
+GMIC_URL="https://github.com/GreycLab/gmic/releases/download/v.${GMIC_VERSION}/$GMIC_TARBALL"
 GIMP_TARBALL="gimp-${GIMP_FULL}.tar.xz"
 GIMP_URL="https://download.gimp.org/gimp/v${GIMP_MM}/$GIMP_TARBALL"
 
